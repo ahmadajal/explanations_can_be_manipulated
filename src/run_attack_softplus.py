@@ -23,10 +23,12 @@ def main():
     argparser.add_argument('--img', type=str, default='../data/collie4.jpeg', help='image net file to run attack on')
     argparser.add_argument('--target_img', type=str, default='../data/tiger_cat.jpeg',
                            help='imagenet file used to generate target expl')
-    argparser.add_argument('--lr', type=float, default=0.0002, help='lr')
+    argparser.add_argument('--initialize_from_adv', type=str, default=None, help='initialize from the x_adv from ReLu network')
+    argparser.add_argument('--lr', type=float, default=0.0003, help='lr')
     argparser.add_argument('--cuda', help='enable GPU mode', action='store_true')
     argparser.add_argument('--output_dir', type=str, default='../output/', help='directory to save results to')
     argparser.add_argument('--beta_growth', help='enable beta growth', action='store_true')
+    argparser.add_argument('--beta', type=float, default=0.8, help='beta for the soft-plus model')
     argparser.add_argument('--prefactors', nargs=2, default=[1e11, 1e6], type=float,
                            help='prefactors of losses (diff expls, class loss)')
     argparser.add_argument('--method', help='algorithm for expls',
@@ -48,20 +50,33 @@ def main():
         model.load_state_dict(torch.load('../models/model_vgg16_pattern_small.pth'), strict=False)
     model = model.eval().to(device)
 
+    # soft-plus model
+    softplus_model = ExplainableNet(vgg_model, data_mean=data_mean, data_std=data_std, beta=args.beta)
+    if method == ExplainingMethod.pattern_attribution:
+        softplus_model.load_state_dict(torch.load('../models/model_vgg16_pattern_small.pth'), strict=False)
+    softplus_model = softplus_model.eval().to(device)
+
     # load images
     x = load_image(data_mean, data_std, device, args.img)
     x_target = load_image(data_mean, data_std, device, args.target_img)
     x_adv = x.clone().detach().requires_grad_()
 
     # produce expls
-    org_expl, org_acc, org_idx = get_expl(model, x, method)
+    org_acc, org_idx = model.classify(x)
+    org_expl, _, _ = get_expl(softplus_model, x, method)
     org_expl = org_expl.detach().cpu()
 
-    target_expl, _, _ = get_expl(model, x_target, method)
+    target_expl, _, _ = get_expl(softplus_model, x_target, method)
     target_expl = target_expl.detach()
 
     ####
     print("prediction before attack: ", org_idx.item())
+
+
+    # initialize with the x_adv from the attack to ReLu network
+    if args.initialize_from_adv:
+        x_adv = torch.load(args.initialize_from_adv).requires_grad_()
+
 
     optimizer = torch.optim.Adam([x_adv], lr=args.lr)
 
@@ -72,7 +87,8 @@ def main():
         optimizer.zero_grad()
 
         # calculate loss
-        adv_expl, adv_acc, class_idx = get_expl(model, x_adv, method, desired_index=org_idx)
+        adv_acc, class_idx = model.classify(x_adv)
+        adv_expl, _, _ = get_expl(softplus_model, x_adv, method, desired_index=org_idx)
         loss_expl = F.mse_loss(adv_expl, target_expl)
         loss_output = F.mse_loss(adv_acc, org_acc.detach())
         total_loss = args.prefactors[0]*loss_expl + args.prefactors[1]*loss_output
@@ -93,9 +109,9 @@ def main():
     # print("Iteration {}: Total Loss: {}, Expl Loss: {}, Output Loss: {}".format(i, total_loss.item(), loss_expl.item(), loss_output.item()))
     print("prediction after attack: ", model(x_adv).argmax().item())
 
-    # test with original model (with relu activations) 
-    model.change_beta(None)
-    adv_expl, adv_acc, class_idx = get_expl(model, x_adv, method)
+    # test with original model (with relu activations) # temoorarily commented out
+    # model.change_beta(None)
+    # adv_expl, adv_acc, class_idx = get_expl(model, x_adv, method)
 
     # save results
     output_dir = make_dir(args.output_dir)
